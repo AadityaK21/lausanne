@@ -1,0 +1,38 @@
+# Lausanne - local legal audio-to-notes pipeline
+#
+# IMPORTANT: do NOT `pip install -r requirements.txt` before installing torch.
+# The CUDA build of torch must come from PyTorch's own index, and installing it
+# second will silently overwrite a CPU-only wheel that pip pulled in as a
+# transitive dependency. See docs/SETUP_WINDOWS.md - step order matters here.
+#
+#   Step 1:  pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+#   Step 2:  pip install -r requirements.txt
+
+# --- core (no GPU, no network) -------------------------------------------
+pydantic>=2.6,<3
+requests>=2.31
+PyYAML>=6.0
+
+# --- ASR ------------------------------------------------------------------
+# 1.1+ needs cuDNN 9. If you hit "Could not locate cudnn_ops64_9.dll" on
+# Windows, see the cuDNN section of docs/SETUP_WINDOWS.md before downgrading.
+faster-whisper>=1.1.0
+# Pulled in by faster-whisper, pinned here so a surprise major bump does not
+# break the CUDA path silently.
+ctranslate2>=4.5.0
+
+# --- diarization ----------------------------------------------------------
+# 4.0+ is required for speaker-diarization-community-1 and the exclusive
+# diarization output the merge stage relies on.
+pyannote.audio>=4.0.0
+
+# --- audio I/O ------------------------------------------------------------
+soundfile>=0.12
+librosa>=0.10
+
+# --- output ---------------------------------------------------------------
+python-docx>=1.1.0
+
+# --- optional: only needed for the evaluation harness ---------------------
+# numpy is already a transitive dependency of torch/librosa, listed for clarity
+numpy>=1.24

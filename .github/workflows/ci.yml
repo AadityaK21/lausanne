@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Both suites run without a GPU, without models, and without network
+    # access. That is a deliberate property: the pipeline's stage contracts
+    # and the app's API surface are testable on any machine, which is what
+    # makes this repository reproducible by someone who does not own a
+    # CUDA card.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies only
+        # Deliberately not requirements.txt: torch, faster-whisper, and
+        # pyannote are multi-gigabyte and are not needed by either suite.
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pydantic>=2.6,<3" requests PyYAML python-docx
+
+      - name: Pipeline suite
+        run: python tests/test_pipeline.py
+
+      - name: Application suite
+        run: python tests/test_app.py
+
+      - name: Byte-compile everything
+        run: python -m compileall -q src run.py app tests

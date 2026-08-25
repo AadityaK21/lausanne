@@ -1,0 +1,14 @@
+Consolidate these per-section notes into one set of notes for the whole
+proceeding. Keep the supporting_uids attached to each claim. Merge duplicates,
+drop redundancy, preserve chronological sense.
+
+Produce at most {n_summary} summary claims and {n_key} key points; keep all
+distinct decisions and action items.
+
+Add nothing that is not already present in the notes below. In particular, do
+not introduce connective legal reasoning ("therefore the court must...") that
+no input claim states. If two input claims conflict, keep both and attribute
+each to its speaker rather than resolving the conflict yourself.
+
+NOTES:
+{excerpt}

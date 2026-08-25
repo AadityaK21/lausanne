@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security or confidentiality concern
+    url: https://github.com/AadityaK21/lausanne/security/advisories/new
+    about: >-
+      If you have found a way for run content to leave the host, or for the
+      attestation to report something untrue, please report it privately
+      rather than opening a public issue.

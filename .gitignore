@@ -1,0 +1,37 @@
+# virtualenvs
+.venv/
+venv/
+env/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# run artefacts — these contain transcripts and notes derived from real audio
+# and must never be committed
+work/
+output/
+results/
+
+# audio and gold corpora are downloaded, not vendored
+data/audio/*
+!data/audio/.gitkeep
+data/gold/*
+!data/gold/.gitkeep
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.flac
+
+# secrets
+.env
+*.token
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

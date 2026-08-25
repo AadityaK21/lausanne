@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "Lausanne: a local, confidentiality-preserving creativity support tool for legal documentation"
+message: "If you use this software or its design principles, please cite it."
+type: software
+authors:
+  - family-names: Kumawat
+    given-names: Aaditya
+    affiliation: "Indian Institute of Technology Delhi"
+repository-code: "https://github.com/AadityaK21/lausanne"
+license: Apache-2.0
+keywords:
+  - legal-ai
+  - speech-recognition
+  - speaker-diarization
+  - summarization
+  - hallucination
+  - design-science-research
+  - privacy-preserving-ml
+abstract: >-
+  A fully local pipeline that converts legal proceeding audio into
+  speaker-attributed, citation-backed notes, together with an evaluation
+  harness measuring word error rate on legally load-bearing tokens,
+  diarization error rate, and note faithfulness. Introduces model-selected
+  extraction, in which a language model's response schema is restricted to
+  source identifiers so that fabricated content is structurally inexpressible
+  rather than merely improbable.

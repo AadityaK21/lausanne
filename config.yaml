@@ -1,0 +1,74 @@
+# Lausanne configuration.
+#
+# Every value here has a default in src/config.py; this file only overrides.
+# Delete any key to fall back to the default.
+
+active_tier: local
+
+asr:
+  # large-v3-turbo: ~4x faster than large-v3, small accuracy cost, ~2.5 GB at
+  # int8_float16. Switch to large-v3 for the accuracy ceiling if you are
+  # willing to pay ~3x the wall clock.
+  model: large-v3-turbo
+  compute_type: int8_float16
+  device: cuda
+  beam_size: 5
+  temperature: 0.0        # reproducibility; do not raise
+  batch_size: 8           # lower to 4 if VRAM is tight
+  vad_filter: true
+  word_timestamps: true   # required for speaker attribution in merge
+  language: en
+
+diarize:
+  model: pyannote/speaker-diarization-community-1
+  fallback_model: pyannote/speaker-diarization-3.1
+  device: cuda
+  use_exclusive: true
+  # Uncomment when you know the bench size - it measurably improves clustering.
+  # min_speakers: 3
+  # max_speakers: 8
+
+extract:
+  summary_sentences: 8
+  key_points: 10
+  keywords: 15
+  min_sentence_words: 6
+
+judge:
+  # Deliberately a different family from the generator. A model judging its
+  # own output inflates support rates.
+  model: llama3.1:8b
+  temperature: 0.0
+  self_consistency_runs: 3
+
+memory:
+  # RTX 4060 Laptop. Adjust total_vram_mb if you move to other hardware.
+  total_vram_mb: 8188
+  reserved_display_mb: 900
+  asr_ceiling_mb: 3600
+  diarize_ceiling_mb: 2200
+  llm_ceiling_mb: 6200
+
+tiers:
+  local:
+    model: qwen3:8b
+    context_tokens: 8192
+    chunk_tokens: 5000
+    chunk_overlap_tokens: 500
+    num_predict: 1536
+    keep_alive: "0"
+  hosted:
+    # PUBLIC COURT AUDIO ONLY. Pointing this at privileged material voids the
+    # confidentiality property the whole system is built around.
+    model: llama3.3:70b
+    context_tokens: 16384
+    chunk_tokens: 12000
+    chunk_overlap_tokens: 800
+    num_predict: 2048
+    # REQUIRED before this tier will run. There is no default on purpose:
+    # a localhost default would mean selecting the 70B tier quietly ran your
+    # local 8B model and reported it as 70B.
+    # host: http://your-rented-box:11434
+
+work_dir: work
+output_dir: output

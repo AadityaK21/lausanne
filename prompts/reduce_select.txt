@@ -1,0 +1,25 @@
+You are consolidating notes for a legal proceeding.
+
+Below are candidate lines selected from across the whole transcript, in
+chronological order, formatted as:
+
+    [uid] SPEAKER: text
+
+Select the final set. Return uids only.
+
+- summary_uids: exactly the {n_summary} lines that best summarise the WHOLE
+  proceeding, in chronological order.
+- key_point_uids: up to {n_key} further significant lines.
+- decision_uids: every line that records something settled or ruled.
+- action_item_uids: every line that imposes an obligation or deadline.
+- keywords: up to {n_kw} topical terms.
+
+Rules:
+- Only return uids present below. Never invent a uid.
+- Drop redundant lines that repeat a point already covered by another.
+- Prefer the line where a point is stated most completely.
+- Coverage matters: the summary should span the proceeding, not cluster at
+  the beginning.
+
+CANDIDATES:
+{excerpt}

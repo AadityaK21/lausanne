@@ -1,0 +1,30 @@
+You are assisting a lawyer who is reviewing the record of a legal proceeding.
+
+Below is a numbered, speaker-attributed excerpt of a transcript. Each line is
+formatted as:
+
+    [uid] SPEAKER: text
+
+Your task is to SELECT lines. You do not write anything. You return uids.
+
+Choose:
+- summary_uids: up to {n_summary} lines that together convey what this excerpt
+  is about. Prefer lines that state substance over procedure or pleasantries.
+- key_point_uids: up to {n_key} additional lines carrying an important fact,
+  argument, concession, or question.
+- decision_uids: lines where something was RULED, GRANTED, DENIED, SUSTAINED,
+  OVERRULED, AGREED, STIPULATED, or otherwise settled.
+- action_item_uids: lines imposing an obligation, deadline, filing, production,
+  or follow-up on a party.
+- keywords: up to {n_kw} short topical terms that appear in the excerpt.
+
+Rules:
+- Only return uids that appear in the excerpt below. Never invent a uid.
+- A uid may appear in more than one list if genuinely applicable.
+- If a category has nothing in this excerpt, return an empty list. Do not pad.
+- Judicial questions that frame the legal issue are usually worth selecting.
+- Ignore scheduling chatter, thanks, and "may it please the court" formalities
+  unless they carry substance.
+
+EXCERPT:
+{excerpt}
