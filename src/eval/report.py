@@ -127,7 +127,16 @@ def evaluate_case(
             row["wer"] = w.wer
             row["legal_term_wer"] = w.legal_term_wer
             row["legal_term_count"] = w.legal_term_count
-            row["top_errors"] = w.top_errors[:10]
+            row["substitution_rate"] = w.substitution_rate
+            row["legal_substitution_rate"] = w.legal_substitution_rate
+            # Keep the legal-term errors specifically. `top_errors` is the
+            # global top-k with the worst legal pairs appended after it, so
+            # slicing the front of the list kept the frequent-but-dull
+            # function-word deletions and discarded every entry the
+            # "Legal-term error examples" section exists to show - which is
+            # why that section rendered empty on a run that had plenty.
+            legal_errs = [e for e in w.top_errors if e.get("legal")]
+            row["top_errors"] = (legal_errs or w.top_errors)[:12]
         row["asr_model"] = asr.model
         row["asr_rtf"] = asr.rtf
         row["asr_seconds"] = asr.elapsed_seconds
@@ -195,6 +204,13 @@ def evaluate_case(
                 entry["judged_claims"] = f.judged_claims
                 entry["support_rate"] = f.support_rate
                 entry["injections_flagged"] = f.injection_attempts_detected
+                # Calibration. Carried alongside the support rate rather than
+                # folded into it, so a reader can see how much of the score
+                # rests on judgements the panel actually settled.
+                entry["undecided_claims"] = f.undecided_claims
+                entry["abstention_rate"] = f.abstention_rate
+                entry["panel_agreement"] = f.mean_item_agreement
+                entry["support_rate_decided"] = f.support_rate_decided
         else:
             # The verbatim check needs no model, so always report it.
             index = merged.by_uid()
@@ -230,6 +246,17 @@ def evaluate_case(
                     entry[f"{cat}_f1"] = r.f1
 
         row["modes"][mode] = entry
+
+    # ---- Speaker-label bias probe
+    # Read rather than run: the probe costs one full selection pass per
+    # condition, which does not belong inside a reporting command. Produce it
+    # with src/eval/bias.py and this picks it up.
+    bpath = work / "bias.json"
+    if bpath.exists():
+        try:
+            row["bias"] = read_raw(bpath).get("conditions", [])
+        except Exception as exc:
+            log.warning("could not read %s: %s", bpath, exc)
 
     return row
 
@@ -267,78 +294,127 @@ def render_markdown(rows: List[Dict[str, Any]], judged: bool) -> str:
     out.append("## Table 1 — Transcription and diarization")
     out.append("")
     out.append(
-        "| Case | Min | WER | Legal-term WER | Ratio | DER | DER (no ovl) | "
+        "| Case | Min | WER | Sub. rate | Legal sub. rate | Ratio | DER | "
         "Speakers ref/hyp | ASR RTF |"
     )
     out.append("|---|---|---|---|---|---|---|---|---|")
     for r in rows:
-        wer, lwer = r.get("wer"), r.get("legal_term_wer")
-        ratio = (lwer / wer) if (wer and lwer) else None
+        sub, lsub = r.get("substitution_rate"), r.get("legal_substitution_rate")
+        ratio = (lsub / sub) if (sub and lsub) else None
         out.append(
             f"| {r.get('case_name', r['id'])[:34]} "
             f"| {r.get('duration_min', 0):.0f} "
-            f"| {_pct(wer)} | {_pct(lwer)} "
+            f"| {_pct(r.get('wer'))} | {_pct(sub)} | {_pct(lsub)} "
             f"| {_num(ratio, 1) + '×' if ratio else '—'} "
-            f"| {_pct(r.get('der'))} | {_pct(r.get('der_no_overlap'))} "
+            f"| {_pct(r.get('der'))} "
             f"| {r.get('reference_speakers', '—')}/{r.get('hyp_speakers', '—')} "
             f"| {_num(r.get('asr_rtf'), 3)} |"
         )
     mean_wer = _mean([r.get("wer") for r in rows])
-    mean_lwer = _mean([r.get("legal_term_wer") for r in rows])
-    mean_ratio = (mean_lwer / mean_wer) if (mean_wer and mean_lwer) else None
+    mean_sub = _mean([r.get("substitution_rate") for r in rows])
+    mean_lsub = _mean([r.get("legal_substitution_rate") for r in rows])
+    mean_ratio = (mean_lsub / mean_sub) if (mean_sub and mean_lsub) else None
     out.append(
-        f"| **mean** |  | **{_pct(mean_wer)}** | **{_pct(mean_lwer)}** "
+        f"| **mean** |  | **{_pct(mean_wer)}** | **{_pct(mean_sub)}** "
+        f"| **{_pct(mean_lsub)}** "
         f"| **{_num(mean_ratio, 1) + '×' if mean_ratio else '—'}** "
-        f"| **{_pct(_mean([r.get('der') for r in rows]))}** "
-        f"| **{_pct(_mean([r.get('der_no_overlap') for r in rows]))}** |  "
+        f"| **{_pct(_mean([r.get('der') for r in rows]))}** |  "
         f"| **{_num(_mean([r.get('asr_rtf') for r in rows]), 3)}** |"
+    )
+    out.append("")
+    out.append(
+        "> **Why the substitution rate is the column to read.** A verbatim "
+        "court transcript records false starts, repetitions and "
+        "interruptions; the recogniser cleans them up. Scored against each "
+        "other, deletions dominate — on this corpus they were the large "
+        "majority of all errors — and they measure a transcription-convention "
+        "disagreement rather than a recognition failure. Substitutions are "
+        "where the model wrote a *different word*, which is the error class "
+        "that matters when the word is a party's name."
     )
     out.append("")
     if mean_ratio and mean_ratio > 1.2:
         out.append(
             f"> Legally load-bearing tokens — case names, citations, statutory "
             f"references, Latin terms — are **{mean_ratio:.1f}× more likely to "
-            f"be transcribed incorrectly** than the average token. Overall WER "
-            f"understates the risk that matters for legal use."
+            f"be substituted** than the average token. Aggregate WER conceals "
+            f"this completely: measured with deletions included, the same "
+            f"corpus shows legal terms as no worse than average."
         )
         out.append("")
 
     # ---- Table 2: note modes
     out.append("## Table 2 — Note generation modes")
     out.append("")
-    header = (
-        "| Mode | Model | Verbatim | Content cov. | Temporal spread | "
-        "Compression | Invalid uids | Sec |"
-    )
-    sep = "|---|---|---|---|---|---|---|---|"
+    # Built as a column list rather than by appending to a formatted string.
+    # The previous version bolted the judged columns on with header[:-1], which
+    # ate the trailing pipe and left the header one separator short of its own
+    # row - invisible with two extra columns, and a broken table with four.
+    cols = [
+        "Mode", "Model", "Verbatim", "Content cov.", "Temporal spread",
+        "Compression", "Invalid uids", "Sec",
+    ]
     if judged:
-        header = header[:-1] + " Judged support | Injections flagged |"
-        sep = sep[:-1] + "---|---|"
-    out.append(header)
-    out.append(sep)
+        cols += ["Judged support", "Undecided", "Panel agr.", "Injections"]
+
+    def _row(cells: List[str]) -> str:
+        assert len(cells) == len(cols), (
+            f"row has {len(cells)} cells but the table has {len(cols)} columns"
+        )
+        return "| " + " | ".join(cells) + " |"
+
+    out.append(_row(cols))
+    out.append("|" + "---|" * len(cols))
 
     for mode in MODES:
         entries = [r["modes"][mode] for r in rows
                    if r.get("modes", {}).get(mode)]
         if not entries:
             continue
-        line = (
-            f"| `{mode}` "
-            f"| {entries[0].get('model') or 'none'} "
-            f"| {_pct(_mean([e.get('verbatim_rate') for e in entries]))} "
-            f"| {_pct(_mean([e.get('content_coverage') for e in entries]))} "
-            f"| {_pct(_mean([e.get('temporal_spread') for e in entries]))} "
-            f"| {_pct(_mean([e.get('compression_ratio') for e in entries]))} "
-            f"| {_num(_mean([e.get('validation_warnings') for e in entries]), 1)} "
-            f"| {_num(_mean([e.get('seconds') for e in entries]), 1)} |"
-        )
+        cells = [
+            f"`{mode}`",
+            entries[0].get("model") or "none",
+            _pct(_mean([e.get("verbatim_rate") for e in entries])),
+            _pct(_mean([e.get("content_coverage") for e in entries])),
+            _pct(_mean([e.get("temporal_spread") for e in entries])),
+            _pct(_mean([e.get("compression_ratio") for e in entries])),
+            _num(_mean([e.get("validation_warnings") for e in entries]), 1),
+            _num(_mean([e.get("seconds") for e in entries]), 1),
+        ]
         if judged:
-            line = line[:-1] + (
-                f" {_pct(_mean([e.get('support_rate') for e in entries]))} "
-                f"| {_num(_mean([e.get('injections_flagged') for e in entries]), 1)} |"
-            )
-        out.append(line)
+            cells += [
+                _pct(_mean([e.get("support_rate") for e in entries])),
+                _pct(_mean([e.get("abstention_rate") for e in entries])),
+                _num(_mean([e.get("panel_agreement") for e in entries]), 2),
+                _num(_mean([e.get("injections_flagged") for e in entries]), 1),
+            ]
+        out.append(_row(cells))
     out.append("")
+
+    if judged:
+        abst = _mean([
+            e.get("abstention_rate")
+            for r in rows for e in r.get("modes", {}).values()
+        ])
+        out.append(
+            "> `Judged support` counts an undecided claim against the system. "
+            "`Undecided` is the share of claims where the self-consistency "
+            "panel split and no verdict was recorded, and `Panel agr.` is the "
+            "mean fraction of the panel agreeing on a checklist item. Both "
+            "exist because model-based scorers are confident well past their "
+            "accuracy, and a majority vote hides that: 3–0 and 2–1 both emerge "
+            "as \"supported\". Reporting the abstention rate makes the "
+            "instability visible instead of averaging it away."
+        )
+        if abst is not None and abst > 0.3:
+            out.append("")
+            out.append(
+                f"> **The judge abstained on {abst * 100:.0f}% of claims.** At "
+                f"that rate the support column is weak evidence. Raise "
+                f"`judge.self_consistency_runs` and re-run before drawing a "
+                f"conclusion from it."
+            )
+        out.append("")
     out.append(
         "> `Verbatim` is the fraction of note lines that are byte-exact spans "
         "of the transcript. It is verified without a model and is therefore "
@@ -381,6 +457,91 @@ def render_markdown(rows: List[Dict[str, Any]], judged: bool) -> str:
                 f"| {_num(_mean([e.get('decisions_f1') for e in entries]), 3)} |"
             )
     out.append("")
+
+    # ---- Table 4: speaker-label bias
+    biased_rows = [r for r in rows if r.get("bias")]
+    out.append("## Table 4 — Speaker-label bias in note selection")
+    out.append("")
+    if not biased_rows:
+        out.append(
+            "*No bias probe has been run. Produce one with "
+            "`python src/eval/bias.py --merged work/<case>/merged.json "
+            "--out work/<case>/bias.json` and re-run this report. Every other "
+            "table in this document measures whether the notes are correct; "
+            "this is the only one that asks whether they are even-handed, and "
+            "a note set can score perfectly everywhere else while quoting one "
+            "side of a case and ignoring the other.*"
+        )
+    else:
+        out.append(
+            "Selection re-run over transcripts whose text is byte-identical "
+            "and whose speaker labels have been altered. `control` leaves the "
+            "labels alone and measures how much the selection moves under "
+            "resampling; nothing below that floor is evidence. Substitute "
+            "labels are width-matched to the originals so that every "
+            "condition is split into the same windows — otherwise a condition "
+            "differs from the baseline in two ways at once and its shift "
+            "cannot be attributed to the labels."
+        )
+        out.append("")
+        out.append(
+            "| Case | Condition | Jaccard vs baseline | Max share shift | "
+            "Most-shifted speaker | Above noise floor |"
+        )
+        out.append("|---|---|---|---|---|---|")
+        for r in biased_rows:
+            for c in r["bias"]:
+                cond = c.get("condition", "?")
+                evidence = c.get("exceeds_noise_floor")
+                mark = (
+                    "— (floor)" if cond == "control"
+                    else "confounded" if not c.get("chunking_matched", True)
+                    else "n/a" if evidence is None
+                    else "**yes**" if evidence else "no"
+                )
+                out.append(
+                    f"| {r.get('case_name', r['id'])[:28]} "
+                    f"| `{cond}` "
+                    f"| {_num(c.get('jaccard'), 3)} "
+                    f"| {_num(c.get('max_share_shift'), 3)} "
+                    f"| {c.get('shifted_speaker') or '—'} "
+                    f"| {mark} |"
+                )
+        out.append("")
+
+        flagged = [
+            (r, c) for r in biased_rows for c in r["bias"]
+            if c.get("exceeds_noise_floor")
+        ]
+        if flagged:
+            out.append(
+                "> **Selection is label-sensitive.** In the rows marked above, "
+                "changing nothing but the speaker labels redistributed the "
+                "notes across the people speaking by more than resampling the "
+                "identical transcript did:"
+            )
+            for r, c in flagged[:6]:
+                out.append(
+                    f"> - {r.get('case_name', r['id'])[:40]} (`"
+                    f"{c.get('condition')}`): {c.get('shifted_speaker')}'s "
+                    f"share moved {float(c.get('max_share_shift', 0)) * 100:.1f} "
+                    f"points."
+                )
+            out.append(
+                "> This is invisible to WER, DER, verbatim rate and judged "
+                "support alike, all of which are satisfied by notes that "
+                "faithfully quote one party and omit the other."
+            )
+        else:
+            out.append(
+                "> No condition moved the selection further than resampling "
+                "the identical transcript did. On this corpus, what gets "
+                "selected is driven by content rather than by who is speaking. "
+                "This is a negative result, and it is reported because the "
+                "measurement is only worth anything if a null outcome is "
+                "reported as readily as a positive one."
+            )
+        out.append("")
 
     # ---- Qualitative
     out.append("## Legal-term error examples")
