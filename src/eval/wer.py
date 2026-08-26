@@ -236,6 +236,7 @@ def score(
 
     subs = dels = ins = 0
     legal_errors = 0
+    legal_subs = 0
     legal_seen = 0
     error_pairs: Counter = Counter()
     legal_error_pairs: Counter = Counter()
@@ -250,6 +251,7 @@ def score(
             error_pairs[(ref[ri], hyp[hi])] += 1
             if is_legal:
                 legal_errors += 1
+                legal_subs += 1
                 legal_error_pairs[(ref[ri], hyp[hi])] += 1
         elif kind == DEL:
             dels += 1
@@ -263,6 +265,8 @@ def score(
     n_ref = len(ref)
     wer = (subs + dels + ins) / n_ref if n_ref else 0.0
     legal_wer = (legal_errors / legal_seen) if legal_seen else None
+    sub_rate = (subs / n_ref) if n_ref else None
+    legal_sub_rate = (legal_subs / legal_seen) if legal_seen else None
 
     top = [
         {
@@ -288,6 +292,8 @@ def score(
         wer=wer,
         legal_term_wer=legal_wer,
         legal_term_count=legal_seen,
+        substitution_rate=sub_rate,
+        legal_substitution_rate=legal_sub_rate,
         top_errors=top,
     )
     log.info(
