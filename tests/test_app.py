@@ -202,6 +202,21 @@ def main() -> int:
         check("input is hashed", bool(att and att.get("input_sha256")),
               (att.get("input_sha256") or "")[:16] if att else "")
 
+        print("\n=== demo mode discloses that it substituted data ===")
+        # A user who uploads their own recording in demo mode gets a synthetic
+        # transcript. Displaying that without saying so is the exact failure
+        # this project exists to prevent, so the disclosure is a tested
+        # property, not a nicety.
+        check("result payload flags demo", res.get("demo") is True)
+        _, _, page = get(f"{base}/")
+        check("interface warns before the run is started",
+              b"will <b>not</b> be transcribed" in page,
+              "warning sits next to the Run button")
+        check("interface can state it is not the user's recording",
+              b"This is not your recording." in page)
+        check("demo pill is styled as a warning, not a neutral label",
+              b'class="pill risk" id="demoPill"' in page)
+
         print("\n=== audio range requests (citation playback) ===")
         status, headers, body = get(f"{base}/api/audio")
         check("serves audio", status == 200, f"{len(body)} bytes")
