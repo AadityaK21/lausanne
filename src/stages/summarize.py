@@ -175,6 +175,10 @@ Write concise notes about this excerpt. For EVERY claim you write, list the
 uids of the transcript lines that support it in supporting_uids. A claim with
 no supporting uid is not permitted.
 
+List AT MOST 3 uids per claim - the lines that most directly support it. Do
+not list every line you read. A reader must be able to check the claim by
+reading those lines and nothing else.
+
 Produce:
 - summary: 2-4 claims describing what happened in this excerpt.
 - key_points: important facts, arguments, or concessions.
@@ -252,6 +256,18 @@ def items_from_uids(uids: List[int], index: Dict[int, Utterance]) -> List[NoteIt
 # --------------------------------------------------------------------------
 
 
+# Ceilings applied only when the reduce stage returns nothing for a category
+# and the pooled map output has to stand in. They are not targets - a healthy
+# reduce routinely returns fewer - they are the point past which "notes" stop
+# being notes.
+FALLBACK_CAPS = {
+    "summary": 10,
+    "key_points": 20,
+    "decisions": 15,
+    "action_items": 15,
+}
+
+
 def run_extractive_llm(
     merged: MergedTranscript, tier: LLMTier, cfg
 ) -> NoteSet:
@@ -322,16 +338,76 @@ def run_extractive_llm(
     # need consolidating.
     candidate_uids = sorted(set(sum(pooled.values(), [])))
     if len(chunks) > 1 and candidate_uids:
-        excerpt = "\n".join(render_line(index[u]) for u in candidate_uids)
-        if estimate_tokens(excerpt) > tier.chunk_tokens:
-            log.warning(
-                "candidate set too large for one reduce call; truncating to "
-                "the highest-value window"
+        # A long argument can select more candidates than fit in one reduce
+        # window. The first version of this truncated the rendered excerpt with
+        # a character slice, which is wrong twice over: it cuts mid-line, so
+        # the model is handed a mangled final entry, and it silently discards
+        # every candidate from the back of the proceeding - the end of a
+        # hearing being where rulings and deadlines actually land.
+        #
+        # Worse, it failed quietly rather than loudly. A reduce given garbage
+        # returns little, and the fallback below then reinstates the unfiltered
+        # map output: on a 62-minute argument that produced 101 "key points",
+        # a quarter of the transcript, presented as notes.
+        #
+        # Reducing in rounds instead. Each round consolidates windows that fit,
+        # and the survivors go round again until they do fit in one call. No
+        # candidate is dropped without a model having considered it.
+        round_num = 0
+        while True:
+            excerpt = "\n".join(render_line(index[u]) for u in candidate_uids)
+            if estimate_tokens(excerpt) <= tier.chunk_tokens:
+                break
+            round_num += 1
+            windows = chunk_utterances(
+                [index[u] for u in candidate_uids], tier.chunk_tokens, 0
             )
-            excerpt = "\n".join(
-                render_line(index[u]) for u in candidate_uids
-            )[: tier.chunk_tokens * 3]
+            log.info(
+                "  reduce round %d: %d candidates do not fit one call; "
+                "consolidating in %d windows",
+                round_num, len(candidate_uids), len(windows),
+            )
+            survivors: List[int] = []
+            for w, window in enumerate(windows, 1):
+                sub = client.chat_structured(
+                    tier.model,
+                    [{"role": "user", "content": reduce_tmpl.format(
+                        excerpt="\n".join(render_line(u) for u in window),
+                        n_summary=4, n_key=6, n_kw=8,
+                    )}],
+                    SelectionResponse,
+                    temperature=tier.temperature,
+                    num_ctx=tier.context_tokens,
+                    num_predict=tier.num_predict,
+                )
+                calls += 1
+                allowed_w = {u.uid for u in window}
+                picked = [
+                    u for field in ("summary_uids", "key_point_uids",
+                                    "decision_uids", "action_item_uids")
+                    for u in getattr(sub, field) if u in allowed_w
+                ]
+                # A window that returns nothing keeps its own candidates rather
+                # than deleting them - an empty response is far more likely to
+                # be a model failure than a genuine "none of this matters".
+                survivors.extend(picked or [u.uid for u in window])
+            new_candidates = sorted(set(survivors))
+            if len(new_candidates) >= len(candidate_uids):
+                log.warning(
+                    "  reduce round %d did not shrink the candidate set "
+                    "(%d -> %d); proceeding with what fits",
+                    round_num, len(candidate_uids), len(new_candidates),
+                )
+                candidate_uids = new_candidates[
+                    : max(1, len(new_candidates) // 2)
+                ]
+                break
+            candidate_uids = new_candidates
+            if round_num >= 4:
+                log.warning("  reduce did not converge in 4 rounds; stopping")
+                break
 
+        excerpt = "\n".join(render_line(index[u]) for u in candidate_uids)
         prompt = reduce_tmpl.format(
             excerpt=excerpt, n_summary=8, n_key=10, n_kw=15
         )
@@ -360,7 +436,24 @@ def run_extractive_llm(
             # A reduce that returns nothing for a category it was given
             # candidates for is more likely a model failure than a genuine
             # empty; fall back to the pooled map result.
-            final[key] = kept if kept else pooled[key]
+            #
+            # But cap the fallback. Unfiltered, the pooled map output is every
+            # line any window thought notable, which on a long argument is a
+            # quarter of the transcript - and reinstating all of it turns a
+            # failed reduce into "notes" that are really just a shorter
+            # transcript. Falling back to the leading portion keeps the
+            # recovery honest about being a recovery.
+            if kept:
+                final[key] = kept
+            else:
+                cap = FALLBACK_CAPS[key]
+                fallback = list(dict.fromkeys(pooled[key]))
+                if len(fallback) > cap:
+                    warnings.append(
+                        f"reduce.{field}: returned nothing; falling back to "
+                        f"{cap} of {len(fallback)} pooled candidates"
+                    )
+                final[key] = fallback[:cap]
         pooled = final
         if resp.keywords:
             keywords = resp.keywords

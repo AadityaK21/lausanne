@@ -193,21 +193,134 @@ class OllamaClient:
         essentially impossible. Semantic violations (an id that does not exist)
         still are possible, which is why callers must validate ids separately.
         """
-        schema = response_model.model_json_schema()
-        content = self.chat(
-            model, messages, format_schema=schema, **kwargs
-        )
-        try:
-            return response_model.model_validate_json(content)
-        except ValidationError:
-            # Rare: a model emits a JSON-looking prefix/suffix around the object.
-            start, end = content.find("{"), content.rfind("}")
-            if start != -1 and end > start:
-                return response_model.model_validate_json(content[start:end + 1])
-            raise OllamaError(
-                f"Model returned unparseable output for "
-                f"{response_model.__name__}: {content[:400]!r}"
+        schema = inline_defs(response_model.model_json_schema())
+
+        # One retry with a larger generation budget, because the dominant
+        # failure here is not malformed JSON - the decoding grammar makes that
+        # essentially impossible - but *truncated* JSON. The grammar keeps the
+        # output well-formed right up until num_predict runs out mid-array,
+        # and what arrives is a valid prefix of a valid document. On an hour of
+        # courtroom audio that killed the abstractive stage outright.
+        #
+        # Retrying rather than repairing is deliberate. Closing the open
+        # brackets would parse, and would silently invent the boundary of a
+        # claim's evidence - exactly the class of quiet fabrication the rest of
+        # this pipeline is built to prevent. Better to spend a second call than
+        # to return a document that looks complete and is not.
+        attempts = []
+        budget = kwargs.pop("num_predict", None)
+
+        for attempt in range(2):
+            call_kwargs = dict(kwargs)
+            if budget is not None:
+                call_kwargs["num_predict"] = budget
+            content = self.chat(
+                model, messages, format_schema=schema, **call_kwargs
             )
+            try:
+                return response_model.model_validate_json(content)
+            except ValidationError as exc:
+                # A model may wrap the object in prose; try the braces first.
+                start, end = content.find("{"), content.rfind("}")
+                if start != -1 and end > start:
+                    try:
+                        return response_model.model_validate_json(
+                            content[start:end + 1]
+                        )
+                    except ValidationError:
+                        pass
+                attempts.append(exc)
+
+            truncated = _looks_truncated(content)
+            if attempt == 0 and truncated and budget:
+                budget = min(budget * 2, 8192)
+                log.warning(
+                    "%s response was cut off mid-structure after %d chars; "
+                    "retrying once with num_predict=%d",
+                    response_model.__name__, len(content), budget,
+                )
+                continue
+            break
+
+        detail = "truncated" if _looks_truncated(content) else "invalid"
+        raise OllamaError(
+            f"Model returned {detail} output for {response_model.__name__}"
+            + (f" even at num_predict={budget}" if detail == "truncated" else "")
+            + f": {content[:300]!r}"
+        )
+
+
+def inline_defs(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve $ref/$defs into a self-contained schema.
+
+    Pydantic factors nested models into `$defs` and points at them with
+    `$ref`. The inference server converts the schema into a decoding grammar,
+    and reference resolution is the part of that conversion most likely to be
+    incomplete or version-dependent - a `$ref` that does not resolve tends to
+    degrade into "any JSON here" rather than raising, which is exactly the
+    failure mode that is hardest to notice: output that parses and means
+    nothing.
+
+    Inlining costs nothing on schemas this size and removes the dependency on
+    the server getting references right.
+
+    `title` and `description` are stripped at the same time. Pydantic copies
+    every model and field docstring into the schema, so the judge's schema was
+    carrying several hundred words of this project's own source commentary -
+    including notes about the bugs being fixed - into the model's context on
+    every call. None of it constrains the grammar, all of it costs tokens, and
+    the instructions belong in the prompt where they can be read.
+    """
+    defs = schema.get("$defs", {})
+    NOISE = ("title", "description")
+
+    def resolve(node: Any, seen: Tuple[str, ...] = ()) -> Any:
+        if isinstance(node, list):
+            return [resolve(v, seen) for v in node]
+        if not isinstance(node, dict):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.split("/")[-1]
+            if name in seen:
+                # Recursive model. Leave the reference alone rather than
+                # expanding forever; nothing in this project has one.
+                return node
+            target = defs.get(name)
+            if target is None:
+                return node
+            merged = resolve(target, seen + (name,))
+            extra = {
+                k: v for k, v in node.items()
+                if k != "$ref" and k not in NOISE
+            }
+            if extra:
+                merged = {**merged, **resolve(extra, seen)}
+            return merged
+        return {
+            k: resolve(v, seen)
+            for k, v in node.items()
+            if k != "$defs" and k not in NOISE
+        }
+
+    return resolve(schema)
+
+
+def _looks_truncated(content: str) -> bool:
+    """
+    Did generation stop mid-document rather than produce something malformed?
+
+    A grammar-constrained decode that runs out of budget leaves unbalanced
+    brackets; a genuinely broken response usually does not. The distinction
+    decides whether retrying with more tokens is worth a second call.
+    """
+    text = (content or "").strip()
+    if not text:
+        return True
+    depth_curly = text.count("{") - text.count("}")
+    depth_square = text.count("[") - text.count("]")
+    return depth_curly > 0 or depth_square > 0
 
 
 def preflight(client: OllamaClient, model: str) -> None:
