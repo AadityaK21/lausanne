@@ -1,0 +1,23 @@
+# Minimal install: transcription, notes, and the app.
+#
+# This is deliberately not requirements.txt. It leaves out pyannote.audio and
+# PyTorch, which together are several gigabytes and are needed only for speaker
+# identification. Everything else works without them:
+#
+#   - transcription (faster-whisper uses CTranslate2, not PyTorch)
+#   - reconciliation, rule-based extraction, rendering to Word and Markdown
+#   - the local application
+#   - both test suites
+#
+# Run with:  python -m pip install -r requirements-minimal.txt
+#
+# Add speaker labels later with:  python -m pip install pyannote.audio
+# (and a Hugging Face token — see docs/SETUP_WINDOWS.md step 4)
+
+faster-whisper>=1.1.0
+ctranslate2>=4.5.0
+
+pydantic>=2.6,<3
+requests>=2.31
+PyYAML>=6.0
+python-docx>=1.1.0

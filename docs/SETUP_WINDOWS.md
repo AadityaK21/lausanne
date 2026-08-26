@@ -19,12 +19,15 @@ seen elsewhere:
 | Requirement | Check | If missing |
 |---|---|---|
 | NVIDIA driver ≥ 550 | `nvidia-smi` | [nvidia.com/drivers](https://www.nvidia.com/download/index.aspx) |
-| Python 3.11 or 3.12 | `python --version` | [python.org](https://www.python.org/downloads/) — tick *Add to PATH* |
+| Python 3.11 or 3.12 | `py -0p` (lists every Python) | [python.org](https://www.python.org/downloads/) — tick *Add to PATH* |
 | ffmpeg | `ffmpeg -version` | `winget install Gyan.FFmpeg` |
 | Ollama | `ollama --version` | [ollama.com/download](https://ollama.com/download) |
 | Git (optional) | `git --version` | `winget install Git.Git` |
 
-Python 3.13 is not recommended yet — several audio wheels still lag.
+Python 3.13 and 3.14 are not recommended yet — several audio wheels still lag,
+`ctranslate2` in particular. If you have more than one Python installed, note
+which one you want *before* creating the venv: `py -0p` lists them with paths,
+and the one marked `*` is what a bare `python` resolves to.
 
 ---
 
@@ -35,9 +38,13 @@ mkdir C:\lausanne -Force
 cd C:\lausanne
 # copy the project files here first
 
-python -m venv .venv
+py -3.12 -m venv .venv          # name the version explicitly
 .\.venv\Scripts\Activate.ps1
 ```
+
+`py -3.12` rather than `python`, because `python` resolves to whichever
+install is first on PATH — which on a machine with several is rarely the one
+you meant.
 
 If activation is blocked:
 
@@ -60,7 +67,7 @@ CPU-only torch as a transitive dependency, everything appears to install
 cleanly, and diarization then runs 5× slower with no error message.
 
 ```powershell
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
 Verify before continuing — do not skip this:
@@ -78,31 +85,49 @@ your driver is too old or you installed the CPU wheel; uninstall
 ## 3. The rest of the dependencies
 
 ```powershell
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-### If you hit `Could not locate cudnn_ops64_9.dll`
+### `Could not locate cudnn_ops64_9.dll` — handled for you
 
-This is the single most common failure on Windows. `faster-whisper` ≥ 1.1 uses
-CTranslate2 ≥ 4.5, which needs cuDNN 9. The CUDA-enabled torch you installed in
-step 2 ships cuDNN 9 inside `site-packages`, but CTranslate2 looks for it on the
-system PATH and does not find it.
+This used to be the single most common failure on Windows, and **the pipeline
+now fixes it itself**. Nothing in this section is a step you have to perform;
+it is here so the mechanism is not a mystery, and because most of the advice
+you will find online is wrong on Windows.
 
-Fix — add torch's bundled DLLs to PATH for this session, then permanently:
+`faster-whisper` >= 1.1 uses CTranslate2 >= 4.5, which links cuDNN 9 and cuBLAS
+at extension-load time and resolves them through the OS loader. The CUDA build
+of PyTorch from step 2 already ships those exact DLLs — on Windows it bundles
+them in `.venv\Lib\site-packages\torch\lib`, a directory the loader has no
+reason to search. Card fine, driver fine, DLLs on disk, import fails.
+
+`src/stages/asr.py` registers that directory with `os.add_dll_directory()`
+before importing `faster_whisper`. Python 3.8+ deliberately stopped honouring
+`PATH` for extension-module dependencies on Windows, so this is the supported
+mechanism — and it affects only that one process, leaving your environment
+untouched.
+
+**Do not follow the `import nvidia.cudnn` advice** found in most tutorials and
+in earlier versions of this file. It is written for Linux, where
+`pip install torch --index-url .../cu126` pulls the CUDA runtime in as separate
+`nvidia-cudnn-cu12` distributions. The Windows wheel has no such dependency —
+there is no `nvidia` package to import — so that command can only ever raise
+`ModuleNotFoundError` on a correctly installed Windows environment. Seeing it
+is not a sign that anything is missing.
+
+To confirm the DLLs are visible:
 
 ```powershell
-$dll = (python -c "import os, nvidia.cudnn; print(os.path.join(os.path.dirname(nvidia.cudnn.__file__), 'bin'))")
-$env:PATH = "$dll;$env:PATH"
-[Environment]::SetEnvironmentVariable("PATH", "$dll;" + [Environment]::GetEnvironmentVariable("PATH","User"), "User")
+python run.py doctor      # reports where cuDNN/cuBLAS were found
 ```
 
-If `nvidia.cudnn` is not importable:
+If it reports them missing, the cause is that torch is a CPU-only build.
+Reinstall from the CUDA index (step 2) rather than installing anything
+cuDNN-specific:
 
 ```powershell
-pip install nvidia-cudnn-cu12 nvidia-cublas-cu12
+python -m pip install --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
-
-Then re-run the PATH command above and **open a new terminal**.
 
 ---
 
@@ -172,7 +197,7 @@ Then run the offline test suite — no models, no network, ~2 seconds:
 python tests\test_pipeline.py
 ```
 
-68 checks should pass.
+187 checks should pass.
 
 ---
 
@@ -239,6 +264,78 @@ python src\eval\extraction_pr.py --gold data\gold\<case>.json --apply-annotation
 ```
 
 Results are written to `results\results.md` and `results\results.json`.
+
+---
+
+## Mixed Python versions
+
+The failure looks like this, and it is worth recognising on sight:
+
+```
+ImportError: Importing the numpy C-extensions failed.
+The following compiled module files exist, but seem incompatible
+with either python 'cpython-314' or the platform 'win32':
+  * _multiarray_umath.cp312-win_amd64.pyd
+```
+
+The venv is running one Python; some of the packages inside it were built for
+another. `numpy`, `ctranslate2`, `lxml` and `torch` all ship version-locked
+binaries, so whichever one imports first is the one that reports the error —
+which is why the message names NumPy even when NumPy is not what you installed
+last.
+
+**How a venv ends up in this state.** `pip` and `python -m pip` are not the
+same command. `python -m pip` is guaranteed to be the pip belonging to the
+interpreter you are running. Bare `pip` is whatever `pip.exe` is first on PATH,
+and that may belong to an entirely different install. The subtlety is that such
+a pip still honours `VIRTUAL_ENV` when deciding *where to write* — so it
+downloads wheels for **its own** interpreter and installs them into **your**
+venv. No warning, no error, correct-looking output. Activating the venv does
+not protect you, because activation changes PATH but a system-wide pip may
+still win.
+
+**Diagnose it:**
+
+```powershell
+python run.py doctor
+```
+
+`doctor` reads the wheel metadata of everything installed and lists any package
+built for a different Python than the one running. It does this without
+importing anything, so it works even when the environment is too broken to
+import NumPy.
+
+To see it by hand:
+
+```powershell
+python -c "import sys; print(sys.version)"
+py -0p                       # every Python on the machine, * marks the default
+Get-Command pip | Select-Object -ExpandProperty Source
+```
+
+If the `pip` path is not inside `C:\lausanne\.venv\Scripts\`, that is the
+culprit.
+
+**Fix it.** Do not try to repair the mixture package by package — you will not
+find them all, and a partially repaired environment fails the same way later.
+Rebuild on one interpreter:
+
+```powershell
+deactivate
+Remove-Item -Recurse -Force .venv
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+python -m pip install -r requirements.txt
+python run.py doctor
+```
+
+Nothing outside `.venv` is touched — no downloaded models, no work artifacts,
+no Ollama models. Only the packages are refetched.
+
+**Use `python -m pip` for the rest of the project's life.** It is three extra
+characters and it removes this entire class of failure.
 
 ---
 
