@@ -214,6 +214,24 @@ main{flex:1;min-height:0;display:flex;}
 }
 .modetabs button.on{background:var(--ink);color:var(--surface);border-color:var(--ink);}
 
+.demobar{
+  display:flex;gap:11px;align-items:flex-start;
+  background:var(--warn-bg);border:1px solid var(--warn);
+  border-left:4px solid var(--warn);border-radius:0 7px 7px 0;
+  padding:12px 14px;margin-bottom:18px;
+}
+.demobar .ico{
+  font-family:var(--mono);font-size:15px;color:var(--warn);
+  line-height:1.1;flex:0 0 auto;
+}
+.demobar .txt{font-size:12.8px;line-height:1.55;color:var(--text);}
+.demobar b{color:var(--warn);}
+.warnrow{
+  background:var(--warn-bg);border:1px solid var(--warn);border-radius:7px;
+  padding:10px 12px;margin-bottom:10px;font-size:12.3px;line-height:1.5;
+  color:var(--text);
+}
+.warnrow b{color:var(--warn);}
 .empty{
   height:100%;display:grid;place-items:center;text-align:center;
   color:var(--muted);font-size:13.5px;padding:40px;
@@ -347,8 +365,8 @@ main{flex:1;min-height:0;display:flex;}
 
   <header class="bar">
     <div class="brand">Lausanne<span class="dot">.</span></div>
-    <span class="pill neutral" id="demoPill" hidden>
-      <span class="led"></span>DEMO
+    <span class="pill risk" id="demoPill" hidden title="Your audio is not being transcribed">
+      <span class="led"></span>DEMO &mdash; SAMPLE DATA
     </span>
     <div class="spacer"></div>
     <button class="pill ok" id="attestPill" hidden>
@@ -391,6 +409,14 @@ main{flex:1;min-height:0;display:flex;}
       </section>
 
       <section id="runSec">
+        <div class="warnrow" id="demoWarn" hidden>
+          <b>Demo mode.</b> Your file will <b>not</b> be transcribed. A short
+          synthetic sample transcript is shown instead so you can see how the
+          interface works without installing models.
+          To process this recording for real, finish
+          <code class="inl">docs\SETUP_WINDOWS.md</code> and restart without
+          <code class="inl">--demo</code>.
+        </div>
         <button class="go" id="go" disabled>Run</button>
       </section>
 
@@ -512,7 +538,10 @@ const bytes = n => n < 1024 ? n + " B"
 async function loadConfig() {
   const r = await fetch("/api/config");
   S.cfg = await r.json();
-  if (S.cfg.demo) $("#demoPill").hidden = false;
+  if (S.cfg.demo) {
+    $("#demoPill").hidden = false;
+    $("#demoWarn").hidden = false;
+  }
 
   const box = $("#modes");
   box.innerHTML = "";
@@ -676,8 +705,15 @@ function listen() {
       loadResult();
     } else if (s.status === "failed") {
       S.es.close(); resetRun();
-      toast(s.error || "Run failed", true);
-      if (s.error) $("#log").textContent = s.error;
+      // Toast the headline; put the whole message where it can be read.
+      const first = (s.error || "Run failed").split("\n")[0];
+      toast(first, true);
+      if (s.error) {
+        const box = $("#log");
+        box.textContent = s.error;
+        box.style.maxHeight = "260px";
+        box.scrollTop = 0;
+      }
     } else if (s.status === "cancelled") {
       S.es.close(); resetRun();
       toast("Cancelled");
@@ -716,9 +752,15 @@ function renderModeTabs(j) {
 
 function renderTranscript(j) {
   const box = $("#transcript"); box.innerHTML = "";
+  if (j.demo) {
+    box.appendChild(demoBar(
+      "The lines below are sample data. The audio player still holds your "
+      + "real file, so the two will not match."));
+  }
   $("#uttCount").hidden = false;
-  $("#uttCount").textContent = j.utterances.length + " lines · " +
-    j.speakers.length + " speakers";
+  $("#uttCount").textContent = (j.demo ? "SAMPLE · " : "") +
+    j.utterances.length + " lines · " + j.speakers.length + " speakers";
+  $("#uttCount").className = "pill " + (j.demo ? "risk" : "neutral");
 
   j.utterances.forEach(u => {
     const d = el("div","utt");
@@ -741,9 +783,25 @@ const SECTIONS = [
   ["decisions","Decisions and rulings"], ["action_items","Obligations"]
 ];
 
+function demoBar(where) {
+  const d = el("div","demobar");
+  d.appendChild(el("div","ico","!"));
+  const t = el("div","txt");
+  t.innerHTML = "<b>This is not your recording.</b> The app is running in "
+    + "demo mode, so a synthetic sample transcript was substituted and your "
+    + "audio file was never transcribed. " + where;
+  d.appendChild(t);
+  return d;
+}
+
 function renderNotes(j) {
   const box = $("#notes"); box.innerHTML = "";
   const n = j.notes;
+
+  if (j.demo) {
+    box.appendChild(demoBar(
+      "Every quotation below comes from that sample, not from your file."));
+  }
 
   const banner = el("div","nsec");
   const isVerbatim = n.mode !== "abstractive";

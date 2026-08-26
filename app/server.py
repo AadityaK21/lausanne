@@ -219,7 +219,7 @@ class Runner:
             # UI must not become a way around the guard.
             tier = self.cfg.tier(job.tier)
             if job.mode != "extractive-rule":
-                prov.guard_tier(job.material, job.tier, tier.host)
+                prov.guard_tier(job.material, job.tier, tier.host, tier.model)
 
             work = run_dir(self.cfg.work_dir, job.audio)
             job.work = work
@@ -284,11 +284,19 @@ class Runner:
             text=True, bufsize=1,
         )
         ticks = 0
+        tail: List[str] = []
         for line in proc.stdout:
             if job.cancelled:
                 proc.terminate()
                 return False
             job.log_line(line)
+            # Keep the end of the stage's output. "exit 1" on its own tells the
+            # user nothing; the cause is always in the last few lines, and
+            # making them dig through a log pane for it is a failure of the
+            # interface, not of their patience.
+            tail.append(line.rstrip())
+            if len(tail) > 12:
+                tail.pop(0)
             # No stage reports true percentage, so creep toward the next
             # boundary on output rather than inventing a fake number.
             ticks += 1
@@ -296,7 +304,14 @@ class Runner:
                                  base + span * (1 - 0.985 ** ticks)))
         proc.wait()
         if proc.returncode != 0:
-            raise RuntimeError(f"stage {name} failed (exit {proc.returncode})")
+            detail = "\n".join(
+                t for t in tail
+                if t.strip() and not t.strip().startswith("Traceback")
+            )
+            raise RuntimeError(
+                f"The {label.lower()} stage failed (exit {proc.returncode}).\n\n"
+                f"{detail or '(no output captured)'}"
+            )
         job.set(progress=base + span)
         return True
 
@@ -608,6 +623,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "run": job.work.name,
             "mode": mode,
+            # The interface must be able to state, unmissably, that the
+            # transcript on screen did not come from the user's file.
+            "demo": self.runner.demo,
             "available_modes": available,
             "audio_name": job.audio.name,
             "duration": merged.audio_duration,

@@ -65,6 +65,25 @@ class TierViolation(RuntimeError):
 
 _LOOPBACK_NAMES = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
 
+# Ollama can serve models that execute on Ollama's infrastructure rather than
+# on this machine. They are requested through the ordinary local endpoint, so
+# the URL looks like loopback while the prompt travels to a third party.
+#
+# This is the most dangerous shape a confidentiality bug can take: the
+# attestation would truthfully report a loopback endpoint and thereby report
+# "no data egress" about a run that egressed everything. Endpoint locality is
+# therefore necessary but not sufficient - the model identity has to be checked
+# too.
+_CLOUD_MODEL_MARKERS = (":cloud", "-cloud", "/cloud")
+
+
+def is_cloud_model(model: Optional[str]) -> bool:
+    """True when a model name denotes remote execution despite a local URL."""
+    if not model:
+        return False
+    name = model.strip().lower()
+    return any(marker in name for marker in _CLOUD_MODEL_MARKERS)
+
 
 def is_local_endpoint(host_or_url: str) -> bool:
     """
@@ -179,7 +198,8 @@ def record_stage(
     artifact: Optional[str] = None,
 ) -> None:
     """Append a stage record, hashing its artefact and classifying its endpoint."""
-    local = is_local_endpoint(endpoint)
+    # A cloud-hosted model makes the stage remote no matter how local the URL is.
+    local = is_local_endpoint(endpoint) and not is_cloud_model(model)
     manifest.stages.append(
         StageRecord(
             stage=stage,
@@ -193,9 +213,14 @@ def record_stage(
             artifact_sha256=sha256_file(artifact) if artifact else None,
         )
     )
-    if endpoint and not local and endpoint not in manifest.data_egress:
-        # This stage sent user content to a non-loopback endpoint.
-        manifest.data_egress.append(endpoint)
+    if not local:
+        # This stage sent user content off this machine, either to a
+        # non-loopback endpoint or through a cloud-hosted model.
+        label = endpoint or "(local endpoint)"
+        if is_cloud_model(model):
+            label = f"{label} via cloud model {model!r}"
+        if label not in manifest.data_egress:
+            manifest.data_egress.append(label)
 
 
 def record_asset_fetch(manifest: RunManifest, endpoint: str) -> None:
@@ -267,18 +292,36 @@ def attest(manifest: RunManifest) -> RunManifest:
     return manifest
 
 
-def guard_tier(material_class: str, tier_name: str, endpoint: str) -> None:
+def guard_tier(material_class: str, tier_name: str, endpoint: str,
+               model: Optional[str] = None) -> None:
     """
     Refuse, before any inference happens, to send privileged material off-host.
 
     DP1 states tier segregation as a design property. Stating it in
     documentation makes it a convention that a hurried user violates at 2am.
     Enforcing it at the point of execution makes it a property of the artefact.
+
+    Two independent ways a run can leave the machine, and the second is the one
+    that looks safe: a remote endpoint, or a cloud-hosted model reached through
+    a local one.
     """
     if material_class != PRIVILEGED:
         return
+
+    if is_cloud_model(model):
+        raise TierViolation(
+            f"Refusing to run model {model!r}.\n"
+            f"Despite being reached at {endpoint or 'a local endpoint'}, a "
+            f"cloud-tagged model executes on the provider's infrastructure, so "
+            f"your transcript would be sent to a third party. The local URL "
+            f"makes this look safe; it is not.\n\n"
+            f"Use a locally-executing model, or re-run with --material public "
+            f"if this recording is genuinely publishable."
+        )
+
     if is_local_endpoint(endpoint):
         return
+
     raise TierViolation(
         f"Refusing to run tier {tier_name!r} against endpoint {endpoint!r}.\n"
         f"This run is classified as PRIVILEGED, and that endpoint is not on "
