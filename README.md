@@ -10,6 +10,11 @@ condition of using the tool at all.
 
 Built for a consumer laptop: RTX 4060 (8 GB VRAM), 16 GB system RAM.
 
+> **On the name.** *Lausanne* refers to the research collaboration this work
+> was carried out in connection with. It is not a product of, endorsed by, or
+> affiliated with the University of Lausanne or HEC Lausanne; the work and any
+> errors in it are the author's own.
+
 [![tests](https://github.com/AadityaK21/lausanne/actions/workflows/ci.yml/badge.svg)](https://github.com/AadityaK21/lausanne/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
@@ -81,7 +86,7 @@ account of it.
 
 ```powershell
 python run.py doctor                              # check the environment
-python tests\test_pipeline.py                     # 68 offline checks, ~2s
+python tests\test_pipeline.py                     # 187 offline checks, ~2s
 python src\eval\fetch_oyez.py --term 2019 --limit 2   # public gold audio
 
 # privileged by default: refuses any non-local inference endpoint
@@ -143,10 +148,12 @@ result. What it measures:
 | Verbatim rate | the transcript itself — no model needed | `src/eval/judge.py` |
 | Claim support (abstractive) | checklist LLM-as-a-Judge | `src/eval/judge.py` |
 | Judge injection susceptibility | planted attacks | `src/eval/judge.py --injection-test` |
+| Judge abstention rate | panel disagreement | `src/eval/judge.py` |
+| **Speaker-label bias** | the transcript, relabelled | `src/eval/bias.py` |
 | Action item / decision P/R | expert annotation | `src/eval/extraction_pr.py` |
 | Content coverage, temporal spread | computed | `src/eval/report.py` |
 
-Two of these are worth calling out.
+Three of these are worth calling out.
 
 **Legal-term WER.** Overall WER on courtroom audio looks reassuring — single
 digits. The error rate restricted to case names, citations, statutory
@@ -168,6 +175,44 @@ content in a delimiter with an explicit instruction hierarchy, and
 `--injection-test` plants prompt-injection attacks in the evaluated text to
 measure whether that defence actually holds — an unmeasured defence being an
 assumption.
+
+It is also allowed to say *I don't know*. Self-consistency voting damps prompt
+sensitivity but throws away the size of the majority: a 3–0 verdict and a 2–1
+verdict come out of the vote indistinguishable, and everything downstream then
+treats them as equally established. Every checklist item carries the fraction
+of the panel that agreed, and a claim whose verdict rests on a split panel is
+recorded as **undecided** rather than resolved by one sample. The asymmetry is
+deliberate — a claim fails on one *stably* false item and passes only when
+every item passes stably, so abstention can never soften a failure into a pass.
+Both denominators are reported: `support_rate` counts abstentions against the
+system, `support_rate_decided` excludes them, side by side so a judge that
+declines every hard case cannot post a flattering score unobserved.
+
+**Whether the notes are even-handed, not just correct.** Every metric above
+asks whether the notes are accurate. None asks whether they are fair. A note
+set that quotes the bench flawlessly and drops counsel's strongest point scores
+100% verbatim, passes every checklist item, and shows no WER or DER error — and
+is still a bad set of notes.
+
+`src/eval/bias.py` asks the other question. A transcript can be relabelled
+without changing a byte of what was said, so selection is re-run over
+transcripts whose text is identical and whose speaker labels have been
+anonymised, and separately permuted so the same labels sit on different people.
+Any difference in what gets selected is caused by the labels.
+
+```bash
+python run.py hearing.wav --mode extractive-llm --bias-probe
+python src/eval/bias.py --merged work/hearing/merged.json --out work/hearing/bias.json
+```
+
+The control condition is the part that makes it a measurement rather than a
+number. Two identical runs do not return the same selection, so a `control` run
+with the labels untouched is measured alongside, and nothing counts as evidence
+unless it exceeds what resampling alone produced — a noisy control *raises* the
+bar rather than lowering it. The verdict is gated on movement in the
+per-speaker distribution, not on set overlap, because a selector can swap out
+half its sentences while leaving every speaker's share intact; that is
+instability, not bias, and conflating the two would manufacture findings.
 
 Gold data comes from [Oyez](https://www.oyez.org) (CC-BY-NC): US Supreme Court
 oral argument audio aligned to official transcripts, with per-turn speaker
@@ -213,11 +258,12 @@ manifest says — and does not pretend to be a network capture.
 
 ## Design principles
 
-The artefact is the instantiation of nine design principles, stated in the
+The artefact is the instantiation of thirteen design principles, stated in the
 Chandra et al. (2015) template and positioned against Herath et al. (2026),
-who derive principles for text-to-image CSTs in visual design. Four have no
-analogue there: three follow from confidentiality, and one from the fact that
-legal documents circulate beyond their author.
+who derive principles for text-to-image CSTs in visual design. Five have no
+analogue there: three follow from confidentiality, one from the fact that legal
+documents circulate beyond their author, and one from the fact that the input
+is speech attributed to parties whose interests oppose one another.
 
 See **[docs/DESIGN_PRINCIPLES.md](docs/DESIGN_PRINCIPLES.md)** and
 **[docs/SECTION_8_REWRITE.md](docs/SECTION_8_REWRITE.md)**.
@@ -252,10 +298,10 @@ src/schemas.py            stage contracts (Pydantic) — the wire format
 src/config.py             config loading, tier definitions, VRAM budget
 src/util/                 io, logging, gpu, ollama client, provenance, legal text normalisation
 src/stages/               asr · diarize · merge · extract · summarize · render
-src/eval/                 fetch_oyez · wer · der · judge · extraction_pr · report
+src/eval/                 fetch_oyez · wer · der · judge · bias · extraction_pr · report
 prompts/                  editable prompt templates
-tests/test_pipeline.py    68 offline checks, no GPU, no network
-tests/test_app.py         28 checks against a live server, no models
+tests/test_pipeline.py    187 offline checks, no GPU, no network
+tests/test_app.py         32 checks against a live server, no models
 docs/                     SETUP_WINDOWS · MEMORY · DESIGN_PRINCIPLES
                           SECTION_8_REWRITE · PAPER_REVISION_NOTES
 ```

@@ -6,8 +6,8 @@ Both suites run with no GPU, no models, and no network:
 
 ```bash
 pip install "pydantic>=2.6,<3" requests PyYAML python-docx
-python tests/test_pipeline.py     # 68 checks
-python tests/test_app.py          # 28 checks
+python tests/test_pipeline.py     # 187 checks
+python tests/test_app.py          # 32 checks
 ```
 
 The application can be exercised the same way:

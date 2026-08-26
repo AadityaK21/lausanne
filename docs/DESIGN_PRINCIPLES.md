@@ -414,8 +414,105 @@ available to a practitioner who is not an enterprise. It is therefore not an
 implementation note but a condition of DP1's reach.
 
 *Instantiation.* `run.py` orchestration by subprocess; Pydantic stage contracts
-in `src/schemas.py`; `MemoryBudget` in `src/config.py`; 44 offline checks in
+in `src/schemas.py`; `MemoryBudget` in `src/config.py`; 187 offline checks in
 `tests/test_pipeline.py`.
+
+---
+
+### DP8 — Abstention over forced verdicts in model-based evaluation
+
+Provide the model-based components of the evaluation with a mechanism for
+recording *no verdict* when the evidence for a verdict is unstable, together
+with the stability measure on which that determination rests **[material
+property]**, so that users can distinguish a judgement the evaluator settled
+from one it merely resolved, and can tell an evaluation that is confident from
+one that is only forced to answer **[action potential]**, given model-based
+evaluators whose expressed confidence exceeds their accuracy and aggregation
+procedures that discard the dispersion of the underlying samples **[boundary
+condition]**.
+
+*Rationale.* DP6 makes the judge auditable by decomposing it into atomic
+booleans and hardening it against the content it evaluates. It does not make
+the judge *calibrated*. Self-consistency voting was introduced to damp
+prompt-sensitivity, and it does — but a majority vote destroys exactly the
+quantity that would let a reader tell a stable judgement from an unstable one.
+A three-nil verdict and a two-one verdict emerge from the vote
+indistinguishable, and every number downstream then treats them as equally
+established.
+
+Work on the calibration of model-based scorers finds that they are confident
+well past their accuracy, and that the usable signal is not the verdict alone
+but the verdict together with a measure of how reliably it reproduces. The
+design consequence is a third outcome. A claim whose verdict rests on a split
+panel is recorded as undecided rather than resolved by whichever side won by
+one sample.
+
+Two properties make this an honest rather than a flattering change. First, the
+asymmetry: a claim fails as soon as one checklist item is *stably* false, and
+passes only when *every* item passes stably — abstention can never soften a
+failure into a pass. Second, both denominators are published. `support_rate`
+counts an undecided claim against the system; `support_rate_decided` excludes
+it; and they are reported side by side, so an evaluator that abstains on every
+hard claim cannot post a flattering score without the abstention rate beside it
+revealing how it got there.
+
+The applicability of this principle is broader than one judge. Any design that
+consumes a model's output as a point estimate — a routing decision, a
+confidence-gated hand-off, a triage score — inherits the same defect, and the
+same remedy: carry the dispersion, and let the system decline.
+
+*Instantiation.* `decide()` and per-item vote agreement in
+`src/eval/judge.py`; `undecided_claims`, `abstention_rate`,
+`mean_item_agreement` and `support_rate_decided` in `FaithfulnessResult`
+(`src/schemas.py`); `judge.abstain_below_agreement` in `src/config.py`;
+calibration columns in Table 2 of `src/eval/report.py`.
+
+---
+
+### DP9 — Counterfactual auditing of identity labels
+
+Provide the system with an evaluation procedure that re-executes its selection
+over inputs whose substantive content is byte-identical and whose participant
+identity labels have been systematically altered, and that reports the
+resulting change against a same-input control **[material property]**, so that
+users and their organisations can detect an artefact that is uniformly accurate
+yet systematically favours one party's contributions **[action potential]**,
+given application domains in which the input is attributed to identified
+parties with opposing interests and in which even-handedness is itself a
+correctness requirement **[boundary condition]**.
+
+*Rationale.* Every other metric in this project asks whether the notes are
+*correct*. None of them asks whether they are *even-handed*. A note set that
+quotes the bench flawlessly and omits counsel's strongest point scores 100% on
+verbatim rate, passes every checklist item the judge applies, and registers no
+error in word error rate or diarization error rate. It is nonetheless a
+defective artefact for the use it is put to, and the defect is invisible to the
+entire measurement apparatus described in DP5 and DP6.
+
+Work on identity-label bias in model decision making finds that a label
+attached to material moves the decision independently of the material itself.
+In a legal transcript the labels are the speakers. The question is therefore
+whether the selector treats a sentence differently when it is attributed to the
+bench rather than to counsel — and it is answerable, because a transcript can
+be relabelled without altering a byte of what was said.
+
+The design commitment is that the measurement carries its own noise floor. Two
+identical runs of the same selection do not return the same set, so a stability
+figure means nothing on its own. A control condition — labels untouched — is
+run alongside the manipulated conditions, and no result counts as evidence
+unless it exceeds what re-sampling alone produced. A control that is itself
+unstable therefore *raises* the bar rather than lowering it, which is the
+correct direction: a noisy measurement should make claims harder to sustain.
+
+The distinction the gate draws is also substantive. Instability is not bias. A
+selector may swap out half its sentences and still give each speaker the same
+share of the notes; that is noise. The reported determination is therefore
+gated on the movement of the per-speaker *distribution*, with set overlap
+reported beside it as context rather than as the criterion.
+
+*Instantiation.* `src/eval/bias.py` (control, anonymised, permuted and named
+conditions); `SpeakerBiasResult` in `src/schemas.py`; `--bias-probe` in
+`run.py`; Table 4 in `src/eval/report.py`.
 
 ---
 
@@ -434,6 +531,8 @@ in `src/schemas.py`; `MemoryBudget` in `src/config.py`; 44 offline checks in
 | DP6 | Extends their DP4 into adversarial evaluation settings | Hallucination; evaluator reliability |
 | DP6-b | Constrains their DP5: an interface may simplify, not widen | Confidentiality |
 | DP7 | No analogue — enabling condition for DP1 on commodity hardware | Confidentiality; skill gap |
+| DP8 | Extends DP6: hardening makes a judge auditable, calibration makes it honest | Evaluator reliability; resistance and liability |
+| DP9 | No analogue — arises from adversarial parties in the input | Fairness; resistance and liability |
 
 ### Relationships among the principles
 
@@ -451,6 +550,18 @@ DP4 is the augmentation commitment made operational, and it depends on DP3-c:
 offering modes of differing faithfulness is defensible only if the resulting
 documents disclose which mode produced them.
 
+DP8 and DP9 are both corrections applied to the measurement apparatus rather
+than to the artefact, and they correct different failures. DP8 is internal to
+DP6: hardening an evaluator makes it auditable, but auditability says nothing
+about whether its verdicts reproduce, so DP8 requires the evaluator to be able
+to decline. DP9 sits outside DP5 and DP6 entirely. Both of those measure
+correctness, and an artefact can satisfy every metric they define while
+distributing its attention unevenly across the parties in the record. DP9 is
+the only principle here that asks a question no correctness metric asks, and it
+is the one that transfers most readily to domains outside legal documentation —
+any setting in which a model selects from material attributed to identified
+people whose interests diverge.
+
 ---
 
 ## 4. Evidential status
@@ -467,6 +578,27 @@ The principles above are derived from artefact construction and technical
 evaluation. They have not been subjected to user studies with legal
 practitioners. In the terms of Nunamaker et al. (2015), proof of concept is
 established; proof of value and proof of use are not.
+
+DP8 and DP9 have now been run to a result on one 62-minute Supreme Court oral
+argument, and both found something.
+
+The evaluator abstained on 31% of claims, with seven of ten abstentions falling
+on a single checklist item — whether a claim asserts a legal conclusion the
+cited lines do not state. That is simultaneously the hardest item to adjudicate
+and the one whose failure carries the most consequence, and a majority vote
+would have reported all seven as settled.
+
+The selector is label-sensitive. Against a noise floor of exactly zero,
+anonymising speakers shifted one speaker's share of the notes by forty
+percentage points and cut recorded rulings from twenty to six. Permuting
+identities changed which sentences were selected without moving the
+distribution, so the effect is not a preference for a particular label but a
+dependence on identity as structure.
+
+One case is one case. These results demonstrate that the properties are
+measurable and that this configuration exhibits them; they do not estimate
+magnitude across proceedings, and the boundary conditions as stated remain
+untested outside US appellate argument.
 
 The asymmetry runs in both directions, and it is worth being precise about it.
 Their evidence is strong on acceptance and use and weak on output correctness,
@@ -488,6 +620,10 @@ as stated.
 
 ## References
 
+Bashardoust, A., Feng, Y., Shrestha, Y. R., & colleagues (2026). When your
+boss is an AI: Identity label bias in LLM task allocation decisions. *Working
+paper*, University of Lausanne.
+
 Chandra, L., Seidel, S., & Gregor, S. (2015). Prescriptive knowledge in IS
 research: Conceptualizing design principles in terms of materiality, action, and
 boundary conditions. *48th HICSS*, 4039–4048.
@@ -499,6 +635,10 @@ Ubisoft. *European Journal of Information Systems*, 35(4), 679–704.
 Iivari, J., Rotvit Perlt Hansen, M., & Haj-Bolouri, A. (2021). A proposal for
 minimum reusability evaluation of design principles. *European Journal of
 Information Systems*, 30(3), 286–303.
+
+Park, Y.-J., Greenewald, K., Alim, K., Wang, H., & Azizan, N. (2025). Know
+what you don't know: Uncertainty calibration of process reward models. *arXiv
+preprint* arXiv:2506.09338.
 
 Nunamaker, J. F., Briggs, R. O., Derrick, D. C., & Schwabe, G. (2015). The last
 research mile: Achieving both rigor and relevance in information systems
