@@ -41,6 +41,82 @@ def _hf_token() -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------
+# Decoding
+# --------------------------------------------------------------------------
+
+# pyannote reads audio through torchaudio and then asserts that a requested
+# window yielded exactly the number of samples the container's duration
+# implies. For compressed formats that assertion is unsafe, and MP3 is the
+# worst case: the codec's encoder delay and end padding mean the header's
+# frame count and the decodable sample count disagree by a few thousand
+# samples. The pipeline then dies on the very first ten-second window with
+#
+#     resulted in 219395 samples instead of the expected 220500 samples
+#
+# which reads like a corrupt file and is not one. Every Oyez argument is an
+# MP3, so on this project's own evaluation corpus this fires every time.
+#
+# Rather than loosening the check - the check is right, and a diarization
+# silently misaligned by 25 ms is worse than one that stops - the input is
+# decoded to 16 kHz mono PCM first. That is the sample rate pyannote resamples
+# to anyway, so nothing is lost, the sample count becomes exact by
+# construction, and the decode is a few seconds on an hour of audio.
+
+WAV_SUFFIXES = {".wav", ".wave"}
+
+
+def _decode_to_wav(audio_path: str) -> tuple[str, object]:
+    """
+    Return (path_to_use, tempdir_or_None).
+
+    The caller must keep the returned TemporaryDirectory alive until pyannote
+    has finished with the file, and is responsible for cleaning it up.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    src = pathlib.Path(audio_path)
+    if src.suffix.lower() in WAV_SUFFIXES:
+        return audio_path, None
+
+    if shutil.which("ffmpeg") is None:
+        log.warning(
+            "ffmpeg not found, so %s is being handed to pyannote as-is. "
+            "Compressed formats can fail with a sample-count mismatch; if "
+            "that happens, install ffmpeg (winget install Gyan.FFmpeg) or "
+            "convert the file to WAV.", src.name,
+        )
+        return audio_path, None
+
+    tmp = tempfile.TemporaryDirectory(prefix="lausanne_diar_")
+    out = pathlib.Path(tmp.name) / (src.stem + ".wav")
+    log.info("decoding %s to 16 kHz mono PCM for diarization", src.name)
+    try:
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+             "-i", str(src), "-ac", "1", "-ar", "16000",
+             "-acodec", "pcm_s16le", str(out)],
+            check=True, capture_output=True, timeout=1800,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        detail = getattr(exc, "stderr", b"") or b""
+        log.warning(
+            "ffmpeg decode failed (%s); using the original file. %s",
+            exc, detail.decode("utf-8", "replace")[:300],
+        )
+        tmp.cleanup()
+        return audio_path, None
+
+    if not out.exists() or out.stat().st_size == 0:
+        log.warning("ffmpeg produced no output; using the original file")
+        tmp.cleanup()
+        return audio_path, None
+
+    return str(out), tmp
+
+
 def _to_turns(annotation) -> list[SpeakerTurn]:
     turns = []
     for segment, _track, label in annotation.itertracks(yield_label=True):
@@ -108,7 +184,12 @@ def diarize(audio_path: str, cfg: DiarizeConfig, ceiling_mb: int) -> Diarization
         hints["max_speakers"] = cfg.max_speakers
 
     log.info("diarizing with %s %s", model_name, hints or "(no speaker hints)")
-    output = pipeline(audio_path, **hints)
+    decoded, tmpdir = _decode_to_wav(audio_path)
+    try:
+        output = pipeline(decoded, **hints)
+    finally:
+        if tmpdir is not None:
+            tmpdir.cleanup()
 
     # community-1 returns an object exposing .speaker_diarization; 3.1 returns
     # the Annotation directly.
