@@ -1,0 +1,23 @@
+# --- Core (always needed: local transcription) ---
+openai-whisper>=20231117
+torch>=2.1
+
+# --- Local LLM mode (--mode llm/both) ---
+transformers>=4.45
+accelerate>=0.33
+sentencepiece>=0.1.99
+# bitsandbytes is required for 4-bit quantization and is Linux/CUDA-only.
+# On Windows, run under WSL2, or use --no-4bit with enough VRAM, or pick a
+# smaller --llm-model.
+bitsandbytes>=0.43 ; platform_system == "Linux"
+
+# --- Output ---
+python-docx>=1.1
+
+# --- Sample audio generation (optional; make_sample.py) ---
+# Cross-platform offline TTS. On Windows, make_sample.py can instead use the
+# built-in System.Speech synthesizer with no extra install.
+pyttsx3>=2.90
+
+# --- Tests (optional) ---
+pytest>=7.0
