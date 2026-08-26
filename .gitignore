@@ -35,3 +35,13 @@ data/gold/*
 .idea/
 .DS_Store
 Thumbs.db
+
+# quarantined run artefacts. Same reason as work/ and output/ above: these are
+# transcripts and notes derived from real recordings. The folder name is not a
+# licence to commit them.
+_to_delete/
+
+# the survey draft this work implements. Unpublished; cited in the docs but
+# not vendored, because a public repo is indexed and archived and a PDF is
+# hard to un-publish.
+docs/legal_ai_survey_paper.pdf
