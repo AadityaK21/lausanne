@@ -212,6 +212,31 @@ class JudgeConfig:
     # Run each checklist item N times and take the majority, to damp the
     # prompt-sensitivity that pointwise judging is known for.
     self_consistency_runs: int = 3
+    # Temperature for those runs, and it must not be zero.
+    #
+    # Self-consistency works by drawing INDEPENDENT samples and seeing whether
+    # they agree. At temperature 0, under a constrained decoding grammar, three
+    # runs are three byte-identical runs: agreement comes back 1.00 on every
+    # claim, no claim is ever undecided, and the whole calibration apparatus
+    # measures determinism while reporting it as confidence. It cost 3x and
+    # told us nothing.
+    #
+    # `temperature` above stays 0 for the single-run case, where reproducibility
+    # is what matters. This one applies only when a panel is actually being
+    # polled.
+    panel_temperature: float = 0.4
+    # Minimum fraction of the panel that must agree before a checklist item is
+    # treated as decided. Below this the claim is recorded as UNDECIDED rather
+    # than being resolved by whichever side won by one vote.
+    #
+    # Work on the calibration of model-based scorers finds they are confident
+    # far beyond their accuracy, and that the usable signal is not the verdict
+    # but the verdict *plus* a measure of how stable it was. A majority vote
+    # discards exactly that measure: 3-0 and 2-1 both emerge as "true". At the
+    # default of three runs a threshold of 0.67 means a 2-1 split abstains, so
+    # a recorded verdict is a unanimous one. Raise the run count before
+    # lowering this: more samples is the honest way to decide more claims.
+    abstain_below_agreement: float = 0.67
 
 
 @dataclass

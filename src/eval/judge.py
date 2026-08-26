@@ -27,6 +27,20 @@ try to hijack the judge. This module is built around those three findings.
                              how often the judge complied. An unmeasured
                              defence is an assumption.
 
+    Abstention beats a       Model-based scorers are poorly calibrated: they
+    forced verdict.          are confident well past their accuracy. Majority
+                             voting hides this, because 3-0 and 2-1 both come
+                             out as "true". Every checklist item therefore
+                             carries the fraction of the panel that agreed,
+                             and a claim whose verdict rests on a split panel
+                             is recorded as UNDECIDED rather than resolved by
+                             one vote. Abstentions are reported, never
+                             quietly dropped: `support_rate` counts them
+                             against the system, `support_rate_decided`
+                             excludes them, and both appear side by side so a
+                             judge that abstains on every hard claim cannot
+                             post a flattering score.
+
 Different model family from the generator by default: a model grading its own
 output inflates agreement, and avoiding it costs nothing.
 
@@ -178,17 +192,35 @@ def plant_injection(cited_text: str, probe_index: int) -> str:
 
 def judge_claim(
     client: OllamaClient, cfg: JudgeConfig, claim: str, cited_text: str,
-) -> Tuple[Dict[str, bool], bool]:
+) -> Tuple[Dict[str, bool], bool, Dict[str, float], int]:
     """
-    Run the checklist with self-consistency; return per-item majority answers.
+    Run the checklist with self-consistency; return per-item majority answers,
+    the injection flag, and how strongly the panel agreed on each item.
 
     Repeated sampling at temperature 0 is not pointless here: the same model
     given the same prompt can still differ across the ordering of a
     multi-item response, and majority voting damps the prompt-sensitivity the
     survey flags without needing a second model.
+
+    The third return value is the part that matters for calibration. A
+    majority vote throws away the size of the majority, so a 3-0 verdict and a
+    2-1 verdict are indistinguishable downstream even though one of them is a
+    coin toss. Work on the calibration of model-based scorers finds that these
+    scorers are confident well past their accuracy, and that the usable signal
+    is the verdict together with its stability. So the agreement fraction is
+    carried out of this function rather than collapsed inside it, and the
+    caller decides - see `decide()` - whether the verdict was stable enough to
+    record at all.
     """
     votes: Dict[str, List[bool]] = {cid: [] for cid, _ in CHECKLIST}
     injection_flags: List[bool] = []
+    usable_runs = 0
+    runs = max(1, cfg.self_consistency_runs)
+    # A panel of one is a reproducibility question; a panel of several is a
+    # sampling question, and sampling at temperature 0 does not sample.
+    temp = (
+        getattr(cfg, "panel_temperature", 0.4) if runs > 1 else cfg.temperature
+    )
 
     user = JUDGE_USER.format(
         items=_ITEM_BLOCK,
@@ -198,7 +230,7 @@ def judge_claim(
     )
     system = JUDGE_SYSTEM.format(delim=cfg.delimiter)
 
-    for run in range(max(1, cfg.self_consistency_runs)):
+    for run in range(runs):
         try:
             resp = client.chat_structured(
                 cfg.model,
@@ -207,7 +239,7 @@ def judge_claim(
                     {"role": "user", "content": user},
                 ],
                 JudgeResponse,
-                temperature=cfg.temperature,
+                temperature=temp,
                 num_ctx=8192,
                 num_predict=768,
             )
@@ -216,20 +248,96 @@ def judge_claim(
             continue
 
         injection_flags.append(bool(resp.injection_detected))
+        matched = 0
         for ans in resp.answers:
-            if ans.item_id in votes:
-                votes[ans.item_id].append(bool(ans.answer))
+            # item_id is an enum on the wire; compare by value.
+            key = getattr(ans.item_id, "value", ans.item_id)
+            if key in votes:
+                votes[key].append(bool(ans.answer))
+                matched += 1
+        if matched:
+            usable_runs += 1
+        else:
+            # Loudly, because the silent version of this cost a full corpus
+            # run: every claim came back "undecided" and the report showed
+            # 100% abstention on output no judge had ever assessed.
+            log.warning(
+                "judge run %d returned %d answers, none matching the "
+                "checklist - ids were %s",
+                run + 1, len(resp.answers),
+                [getattr(a.item_id, "value", a.item_id) for a in resp.answers],
+            )
+
+    if usable_runs == 0:
+        log.error(
+            "the judge produced no usable answers across %d runs. This is an "
+            "evaluator failure, not a verdict about the claim - do not read "
+            "the resulting abstention as caution.",
+            max(1, cfg.self_consistency_runs),
+        )
 
     majority: Dict[str, bool] = {}
+    agreement: Dict[str, float] = {}
     for cid, vs in votes.items():
         if not vs:
             # No answer is treated as a failure, not a pass. An evaluator that
             # defaults to "supported" when it cannot decide is worse than none.
+            # Agreement 0.0 additionally routes this to UNDECIDED rather than
+            # letting a silent judge masquerade as a confident rejection.
             majority[cid] = False
+            agreement[cid] = 0.0
             continue
-        majority[cid] = Counter(vs).most_common(1)[0][0]
+        winner, count = Counter(vs).most_common(1)[0]
+        majority[cid] = winner
+        agreement[cid] = count / len(vs)
 
-    return majority, any(injection_flags)
+    return majority, any(injection_flags), agreement, usable_runs
+
+
+# --------------------------------------------------------------------------
+# Verdict with abstention
+# --------------------------------------------------------------------------
+
+SUPPORTED = "supported"
+UNSUPPORTED = "unsupported"
+UNDECIDED = "undecided"
+
+
+def decide(
+    answers: Dict[str, bool], agreement: Dict[str, float], threshold: float,
+) -> Tuple[str, List[str]]:
+    """
+    Turn per-item answers plus their stability into one of three verdicts.
+
+    The rule is asymmetric on purpose, because the two verdicts do not rest on
+    the same evidence:
+
+      * A claim is UNSUPPORTED as soon as one checklist item is *stably* false.
+        One confident failure is enough; the other items' stability is
+        irrelevant, because nothing they could say would rescue the claim.
+      * A claim is SUPPORTED only if *every* item passed stably. A pass is a
+        conjunction, so its weakest link sets its strength.
+      * Everything else is UNDECIDED: the verdict, whichever way it points,
+        rests on a split panel.
+
+    Returning UNDECIDED instead of forcing a verdict is what keeps an unstable
+    judgement out of the support rate rather than silently inside it. Note this
+    never converts a failure into a pass - the conservative property of the
+    original code survives - it only stops the harness from claiming a
+    precision it does not have.
+    """
+    weak = [cid for cid in answers if agreement.get(cid, 0.0) < threshold]
+    failing = [cid for cid, ok in answers.items() if not ok]
+
+    if failing:
+        confident_failures = [cid for cid in failing if cid not in weak]
+        if confident_failures:
+            return UNSUPPORTED, confident_failures
+        return UNDECIDED, failing
+
+    if weak:
+        return UNDECIDED, weak
+    return SUPPORTED, []
 
 
 def evaluate(
@@ -251,6 +359,24 @@ def evaluate(
         notes.mode.value, len(items), len(verbatim), len(non_verbatim),
     )
 
+    runs = max(1, cfg.self_consistency_runs)
+    panel_temp = getattr(cfg, "panel_temperature", 0.4)
+    if non_verbatim and runs > 1:
+        if panel_temp <= 0:
+            log.warning(
+                "self_consistency_runs=%d at temperature 0: the runs will be "
+                "identical, agreement will read 1.00 everywhere, and no claim "
+                "can ever be undecided. That is determinism being reported as "
+                "confidence. Set judge.panel_temperature above 0 or drop to a "
+                "single run.", runs,
+            )
+        else:
+            log.info(
+                "panel of %d at temperature %.2f (single-run temperature %.2f "
+                "is for reproducibility, not sampling)",
+                runs, panel_temp, cfg.temperature,
+            )
+
     # An extractive mode with a non-verbatim claim is a pipeline defect.
     if notes.mode in (NoteMode.EXTRACTIVE_RULE, NoteMode.EXTRACTIVE_LLM):
         if non_verbatim:
@@ -267,7 +393,11 @@ def evaluate(
 
     detail: List[Dict] = []
     supported = 0
+    undecided = 0
+    evaluator_failures = 0
     injections_detected = 0
+    agreement_samples: List[float] = []
+    threshold = float(getattr(cfg, "abstain_below_agreement", 0.0) or 0.0)
 
     if non_verbatim:
         client = OllamaClient(host=cfg.host, keep_alive=cfg.keep_alive)
@@ -286,17 +416,38 @@ def evaluate(
                 cited_text = plant_injection(cited_text, n)
 
             log.info("  judging claim %d/%d", n, len(non_verbatim))
-            answers, injected = judge_claim(client, cfg, item.text, cited_text)
+            answers, injected, agreement, usable = judge_claim(
+                client, cfg, item.text, cited_text
+            )
+            verdict, reason = decide(answers, agreement, threshold)
+            if usable == 0:
+                evaluator_failures += 1
 
-            passed = all(answers.values())
-            supported += int(passed)
+            agreement_samples.extend(agreement.values())
+            supported += int(verdict == SUPPORTED)
+            undecided += int(verdict == UNDECIDED)
             injections_detected += int(injected)
+
+            if verdict == UNDECIDED and usable == 0:
+                log.info("    UNDECIDED - the evaluator returned nothing")
+            elif verdict == UNDECIDED:
+                log.info(
+                    "    UNDECIDED - panel split on %s (agreement %s)",
+                    ", ".join(reason),
+                    ", ".join(f"{agreement.get(c, 0.0):.2f}" for c in reason),
+                )
 
             detail.append({
                 "claim": item.text[:300],
+                "evaluator_runs_usable": usable,
                 "cited_uids": [c.uid for c in item.citations],
                 "answers": answers,
-                "supported": passed,
+                "agreement": {k: round(v, 3) for k, v in agreement.items()},
+                "verdict": verdict,
+                "verdict_reason": reason,
+                # Kept for backward compatibility with anything reading the
+                # old field. Undecided is NOT counted as supported.
+                "supported": verdict == SUPPORTED,
                 "injection_detected": injected,
                 "injection_planted": injection_test,
             })
@@ -315,16 +466,31 @@ def evaluate(
         )
 
     total = len(items)
+    n_judged = len(non_verbatim)
+    decided = n_judged - undecided
+
     result = FaithfulnessResult(
         mode=notes.mode.value,
         total_claims=total,
         verbatim_claims=len(verbatim),
         verbatim_rate=(len(verbatim) / total) if total else 0.0,
-        judged_claims=len(non_verbatim),
+        judged_claims=n_judged,
         supported_claims=supported,
-        support_rate=(supported / len(non_verbatim)) if non_verbatim else None,
+        # Conservative reading: an undecided claim is not a supported claim.
+        support_rate=(supported / n_judged) if n_judged else None,
         injection_attempts_detected=injections_detected,
         checklist_detail=detail,
+        undecided_claims=undecided,
+        abstention_rate=(undecided / n_judged) if n_judged else None,
+        mean_item_agreement=(
+            sum(agreement_samples) / len(agreement_samples)
+            if agreement_samples else None
+        ),
+        # Support rate over the claims the panel actually settled. Reported
+        # beside support_rate, never instead of it: quoting only this number
+        # would let a judge that abstains on everything hard claims post a
+        # flattering score.
+        support_rate_decided=(supported / decided) if decided > 0 else None,
     )
 
     log.info(
@@ -333,6 +499,29 @@ def evaluate(
         f"{result.support_rate * 100:.1f}%" if result.support_rate is not None
         else "n/a (nothing to judge)",
     )
+    if n_judged:
+        log.info(
+            "  calibration | %d/%d undecided (%.1f%%) | mean panel agreement "
+            "%.2f | support over decided claims %s",
+            undecided, n_judged, (result.abstention_rate or 0.0) * 100,
+            result.mean_item_agreement or 0.0,
+            f"{result.support_rate_decided * 100:.1f}%"
+            if result.support_rate_decided is not None else "n/a",
+        )
+        if evaluator_failures:
+            log.error(
+                "%d of %d claims were never assessed - the evaluator returned "
+                "no usable answers for them. Those abstentions are a broken "
+                "judge, not a cautious one, and the support rate above is not "
+                "a measurement. Check that %s follows the response schema.",
+                evaluator_failures, n_judged, cfg.model,
+            )
+        elif (result.abstention_rate or 0.0) > 0.3:
+            log.warning(
+                "the judge abstained on more than 30% of claims. Treat the "
+                "support rate as weak evidence and raise "
+                "judge.self_consistency_runs before reading anything into it."
+            )
     return result
 
 
@@ -344,6 +533,12 @@ def main() -> int:
     ap.add_argument("--model", default=None, help="override judge model")
     ap.add_argument("--runs", type=int, default=None,
                     help="self-consistency runs per claim")
+    ap.add_argument("--panel-temperature", type=float, default=None,
+                    help="temperature for self-consistency runs; 0 makes them "
+                         "identical and the panel meaningless")
+    ap.add_argument("--abstain-below", type=float, default=None,
+                    help="panel agreement below which a claim is recorded as "
+                         "undecided rather than decided (default 0.67)")
     ap.add_argument("--limit", type=int, default=None,
                     help="judge only the first N claims (for quick checks)")
     ap.add_argument("--injection-test", action="store_true",
@@ -356,6 +551,10 @@ def main() -> int:
         cfg.judge.model = args.model
     if args.runs:
         cfg.judge.self_consistency_runs = args.runs
+    if args.panel_temperature is not None:
+        cfg.judge.panel_temperature = args.panel_temperature
+    if args.abstain_below is not None:
+        cfg.judge.abstain_below_agreement = args.abstain_below
 
     merged = read_json(args.merged, MergedTranscript)
     notes = read_json(args.notes, NoteSet)
@@ -381,6 +580,15 @@ def main() -> int:
         if result.support_rate is not None:
             print(f"  judged supported  {result.supported_claims}/"
                   f"{result.judged_claims} ({result.support_rate * 100:.1f}%)")
+        if result.abstention_rate is not None:
+            print(f"  undecided         {result.undecided_claims}/"
+                  f"{result.judged_claims} "
+                  f"({result.abstention_rate * 100:.1f}%)")
+            print(f"  panel agreement   "
+                  f"{result.mean_item_agreement or 0.0:.2f}")
+            if result.support_rate_decided is not None:
+                print(f"  support (decided) "
+                      f"{result.support_rate_decided * 100:.1f}%")
         print(f"  injections flagged {result.injection_attempts_detected}")
         print()
     return 0

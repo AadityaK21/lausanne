@@ -38,8 +38,15 @@ judge:
   # Deliberately a different family from the generator. A model judging its
   # own output inflates support rates.
   model: llama3.1:8b
+  # Used only when self_consistency_runs is 1.
   temperature: 0.0
   self_consistency_runs: 3
+  # Used when a panel is polled. Must be > 0 or the runs are identical and
+  # agreement reads 1.00 on everything - determinism reported as confidence.
+  panel_temperature: 0.4
+  # Panel agreement below this records the claim as undecided rather than
+  # resolving it by one vote. At 3 runs, 0.67 means a 2-1 split abstains.
+  abstain_below_agreement: 0.67
 
 memory:
   # RTX 4060 Laptop. Adjust total_vram_mb if you move to other hardware.
